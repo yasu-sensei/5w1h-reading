@@ -94,6 +94,13 @@ body.in-result footer{display:none}
   .reading-phase .reading-actions{flex-shrink:0}
 }
 @media(max-width:899px){.reading-phase .passage{min-height:240px}.reading-actions{padding-bottom:12px}}
+
+.success-mark.hanamaru{width:136px;height:126px;background:transparent;color:#db4053;border-radius:0}
+.hanamaru svg{display:block;width:100%;height:100%;overflow:visible}
+.success-actions{flex-direction:column;gap:10px}
+.daily-finish{margin:0;text-align:center;font-size:18px;color:var(--green);line-height:1.5}
+.daily-finish strong{margin-left:8px}
+@media(max-width:600px){.success-mark.hanamaru{width:112px;height:104px}.daily-finish{font-size:16px}}
 </style>
 </head>
 <body>
@@ -105,6 +112,21 @@ body.in-result footer{display:none}
 (() => {
 const categories = { Who: 'だれ', When: 'いつ', Where: 'どこ', What: 'なに', Why: 'なぜ', How: 'どのように', WhatKind: 'どのような' };
 const STORAGE_KEY = '5w1h-reading:progress:v1';
+const DAILY_KEY = '5w1h-reading:daily:v1';
+function japanDay(date = new Date()) {
+  return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+}
+function decodeDaily(raw, sets) {
+  if (raw === null) return null;
+  const saved = JSON.parse(raw);
+  if (saved?.version !== 1 || !/^\d{4}-\d{2}-\d{2}$/.test(saved.date) || !sets.some(s => s.id === saved.setId) || typeof saved.cleared !== 'boolean') throw new Error('1日の進捗データが不正です');
+  return saved;
+}
+function dailyPlan(sets, completed, daily, date = japanDay()) {
+  if (daily?.date === date) return { state: daily.cleared ? 'done' : 'resume', setId: daily.setId };
+  const next = nextSet(sets, completed);
+  return next ? { state: 'ready', setId: next.id } : { state: 'all-done', setId: null };
+}
 function validateSet(set) {
   if (!Number.isInteger(set.level) || set.level < 1 || set.level > 5 || set.sentences.length < 2 || set.sentences.length > 4 || set.questions.length !== 4) throw new Error(`本文・問題数・レベルが不正: ${set.id}`);
   for (const q of set.questions) {
@@ -148,7 +170,7 @@ function encodeProgress(state, version) {
 const app = document.querySelector('#app');
 const labels = ['あ', 'い', 'う'];
 const escape = value => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-let data, progress = { completed: [], last: null }, notice = '', saveMessage = '';
+let data, progress = { completed: [], last: null }, notice = '', saveMessage = '', daily = null;
 let screen = 'home', set, answers, question = 0, speech = false, previousAnswers = null, retryArrival = false;
 const canSpeak = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
 function stopSpeech() { if (canSpeak) window.speechSynthesis.cancel(); }
@@ -160,7 +182,26 @@ function speak(text) {
   window.speechSynthesis.speak(utterance);
 }
 function button(text, action, style = '', extra = '') { return `<button type="button" class="${style}" data-action="${action}" ${extra}>${text}</button>`; }
+function todayPlan() {
+  try {
+    const savedProgress = localStorage.getItem(STORAGE_KEY);
+    if (savedProgress !== null) progress = decodeProgress(savedProgress, data);
+  } catch { /* 現在の画面内の進捗は維持。 */ }
+  try {
+    const raw = localStorage.getItem(DAILY_KEY);
+    if (raw !== null) daily = decodeDaily(raw, data.sets);
+  } catch { /* 保存が使えない場合も、この画面内では1日1話を維持する。 */ }
+  return dailyPlan(data.sets, progress.completed, daily);
+}
+function saveDaily(value) {
+  daily = value;
+  try { localStorage.setItem(DAILY_KEY, JSON.stringify(value)); }
+  catch { notice = 'きょうの すすみぐあいを ほぞんできませんでした。この がめんでは あそべます。'; }
+}
 function start(id, announceRetry = false) {
+  const plan = todayPlan();
+  if (!['ready', 'resume'].includes(plan.state) || id !== plan.setId) { screen = 'home'; render(); return; }
+  saveDaily({ version: 1, date: japanDay(), setId: id, cleared: false });
   retryArrival = announceRetry;
   set = data.sets.find(s => s.id === id);
   previousAnswers = progress.last?.setId === id ? [...progress.last.answers] : null;
@@ -174,13 +215,14 @@ function bar(text) {
   return `<div class="lesson-bar">${button('← ホーム', 'home', 'text-button')}<span>レベル ${set.level} <span class="dot">·</span> ${escape(set.theme)}${retry ? '<span class="retry-badge" role="status"><span aria-hidden="true">↻</span> もういちど！</span>' : ''}</span><label class="speech-toggle"><input id="speech-toggle" type="checkbox" ${speech ? 'checked' : ''} ${canSpeak ? '' : 'disabled'}> よみあげ</label></div><p id="speech-status" class="sr-only" role="status"></p><div class="eyebrow">セット ${data.sets.indexOf(set) + 1} / ${data.sets.length} <span> ${text}</span></div>`;
 }
 function home() {
+  const plan = todayPlan(), done = plan.state === 'done', allDone = plan.state === 'all-done';
   const next = nextSet(data.sets, progress.completed), count = progress.completed.length;
-  return `<section class="home-hero"><span class="eyebrow">よむ → みつける → たしかめる</span><h1 tabindex="-1">おはなしの なかに、<br>こたえが あるよ。</h1><p>みじかい おはなしを よんで、<br class="mobile-break">4つの もんだいに ちょうせん。<br>ぜんぶ せいかいしたら、つぎへ すすもう。</p><div class="hero-actions">${button(count ? (next ? 'つづきから　→' : 'もういちど　→') : 'はじめる　→', 'continue', 'primary')}</div></section>
-    <section class="progress-card card"><div><span class="section-caption">ここまでの たんけん</span><strong>${count}<small> / ${data.sets.length} セット</small></strong></div><progress value="${count}" max="${data.sets.length}" aria-label="おわったセット"></progress><p>${next ? `つぎは レベル ${next.level}「${escape(next.title)}」` : 'ぜんぶの セットが おわったよ！'}</p></section>
+  return `<section class="home-hero"><span class="eyebrow">1にち 1つの おはなし</span><h1 tabindex="-1">${done ? 'きょうは はなまる！<br>また あした よもう。' : allDone ? 'すべての おはなしを<br>よみおわったよ！' : 'きょうの おはなしを、<br>じっくり よもう。'}</h1><p>まずは おはなしを よんで、4つの もんだいに ちょうせん。<br>${done ? 'つぎの おはなしは、あしたの おたのしみ。' : 'まちがえても、おなじ おはなしに もういちど ちょうせんできるよ。'}</p><div class="hero-actions">${done ? button('きょうの はなまるを みる', 'today-award', 'primary') : allDone ? '' : button(plan.state === 'resume' ? 'きょうの つづきから →' : 'きょうの おはなし →', 'continue', 'primary')}</div></section>
+    <section class="progress-card card"><div><span class="section-caption">ここまでの たんけん</span><strong>${count}<small> / ${data.sets.length} セット</small></strong></div><progress value="${count}" max="${data.sets.length}" aria-label="おわったセット"></progress><p>${next ? `${done ? 'あしたの おはなし' : 'きょうの おはなし'}：レベル ${next.level}「${escape(done ? next.title : data.sets.find(s => s.id === plan.setId)?.title ?? next.title)}」` : 'ぜんぶの セットが おわったよ！'}</p></section>
     ${notice ? `<p class="notice" role="status">${escape(notice)}</p>` : ''}
-    <div class="home-facts"><div><b>01</b><span>やさしい もんだいから</span></div><div><b>02</b><span>なんどでも よみなおせる</span></div><div><b>03</b><span>じかんは きにしない</span></div></div>
-    <details class="library"><summary>おはなしを みる</summary><p>4もん ぜんぶ せいかいすると、つぎへ すすめるよ。</p><div class="set-list">${data.sets.map((s, i) => { const available = progress.completed.includes(s.id) || s.id === next?.id; return button(`<span>${String(i + 1).padStart(2, '0')} · レベル ${s.level}</span>${escape(s.title)}<small>${progress.completed.includes(s.id) ? '✓ おわったよ' : available ? 'つぎの おはなし' : 'まだ あけられないよ'}</small>`, 'choose', 'set-button', `data-id="${s.id}" ${available ? '' : 'disabled'}`); }).join('')}</div></details>
-    <p class="storage-note">つづきは この ブラウザに ほぞんします。<br>みんなで つかう ブラウザでは、すすみぐあいも いっしょです。</p>${button('はじめから やりなおす', 'reset', 'text-button reset')}`;
+    <div class="home-facts"><div><b>01</b><span>1にち 1つを じっくり</span></div><div><b>02</b><span>おなじ おはなしで さいちょうせん</span></div><div><b>03</b><span>クリアで はなまる</span></div></div>
+    <details class="library"><summary>おはなしを みる</summary><p>きょうの おはなしだけ あけられるよ。つぎは あした。</p><div class="set-list">${data.sets.map((s, i) => { const available = ['ready', 'resume'].includes(plan.state) && s.id === plan.setId; return button(`<span>${String(i + 1).padStart(2, '0')} · レベル ${s.level}</span>${escape(s.title)}<small>${progress.completed.includes(s.id) ? '✓ はなまる' : available ? 'きょうの おはなし' : 'また こんど'}</small>`, 'choose', 'set-button', `data-id="${s.id}" ${available ? '' : 'disabled'}`); }).join('')}</div></details>
+    <p class="storage-note">1にちの くぎりは にほんの じかんです。<br>おなじ ブラウザを つかう ひとは、すすみぐあいも いっしょです。</p>${button('はじめから やりなおす', 'reset', 'text-button reset')}`;
 }
 function readingView() {
   return `${bar('まず おはなしを よもう')}<div class="lesson-columns reading-phase"><div class="reading-column">${passage()}<div class="reading-actions">${button('よみおわった →', 'read-done', 'primary')}</div></div></div>`;
@@ -199,6 +241,10 @@ function questionView() {
 }
 function submitAnswers() {
   if (screen !== 'question' || !completeAnswers(answers)) return;
+  const plan = todayPlan();
+  if (plan.state === 'done' || (daily?.date === japanDay() && daily.setId !== set.id)) { screen = 'home'; render(); return; }
+  const passed = grade(set, answers).every(q => q.ok);
+  saveDaily({ version: 1, date: japanDay(), setId: set.id, cleared: passed });
   progress = recordResult(progress, set, answers);
   try { localStorage.setItem(STORAGE_KEY, encodeProgress(progress, data.version)); saveMessage = 'この ブラウザに ほぞんしたよ。'; notice = ''; }
   catch { saveMessage = 'この たんまつに ほぞんできませんでした。このまま あそべます。'; notice = saveMessage; }
@@ -206,9 +252,18 @@ function submitAnswers() {
   screen = 'success';
   render();
 }
+function hanamaru() {
+  const points = Array.from({ length: 24 }, (_, i) => {
+    const angle = i * Math.PI / 12 - Math.PI / 2, radius = i % 2 === 0 ? 54 : 43;
+    return [68 + Math.cos(angle) * radius, 64 + Math.sin(angle) * radius];
+  });
+  const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const first = mid(points.at(-1), points[0]);
+  const path = `M${first.join(',')} ` + points.map((p, i) => `Q${p.join(',')} ${mid(p, points[(i + 1) % points.length]).join(',')}`).join(' ') + ' Z';
+  return `<svg viewBox="0 0 144 132" aria-hidden="true"><path d="${path}" fill="#fff0ed" stroke="currentColor" stroke-width="5" stroke-linejoin="round"/><circle cx="68" cy="64" r="32" fill="none" stroke="currentColor" stroke-width="5"/><circle cx="68" cy="64" r="22" fill="none" stroke="currentColor" stroke-width="4"/><path d="M89 88 Q112 119 130 93" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round"/></svg>`;
+}
 function success() {
-  const next = nextSet(data.sets, progress.completed);
-  return `${bar('クリア！')}<section class="result-summary card celebration" aria-labelledby="success-title"><div class="celebration-stars" aria-hidden="true">${Array.from({ length: 8 }, (_, i) => `<span style="--i:${i};--row:${i % 3}">★</span>`).join('')}</div><div class="success-mark" aria-hidden="true">○</div><div class="success-copy"><span class="success-kicker">4もん ぜんぶ</span><h1 id="success-title" tabindex="-1">ぜんぶ せいかい！</h1><p>やったね！ この おはなしを クリア！</p></div><p class="save-status" role="status">${escape(saveMessage)}</p></section><div class="result-actions success-actions">${next ? button('つぎの おはなし →', 'continue', 'primary') : button('ぜんぶ おわった！ ホームへ', 'home', 'primary')}</div>`;
+  return `${bar('きょうの はなまる！')}<section class="result-summary card celebration" aria-labelledby="success-title"><div class="celebration-stars" aria-hidden="true">${Array.from({ length: 8 }, (_, i) => `<span style="--i:${i};--row:${i % 3}">★</span>`).join('')}</div><div class="success-mark hanamaru" role="img" aria-label="はなまる">${hanamaru()}</div><div class="success-copy"><span class="success-kicker">はなまる！</span><h1 id="success-title" tabindex="-1">ぜんぶ せいかい！</h1><p>きょうの おはなし、よく よめたね！</p></div><p class="save-status" role="status">${escape(saveMessage)}</p></section><div class="result-actions success-actions"><p class="daily-finish">きょうは ここまで。<strong>また あした！</strong></p>${button('ホームへ', 'home', 'primary')}</div>`;
 }
 function fitLesson() {
   delete app.dataset.density;
@@ -221,6 +276,8 @@ function fitLesson() {
   }
 }
 window.addEventListener('resize', fitLesson);
+window.addEventListener('focus', () => { if (data && screen === 'home') render(); });
+window.addEventListener('storage', event => { if (data && [DAILY_KEY, STORAGE_KEY].includes(event.key) && screen === 'home') render(); });
 function render() {
   stopSpeech();
   app.dataset.screen = screen;
@@ -250,12 +307,13 @@ app.addEventListener('change', event => {
 app.addEventListener('click', event => {
   const el = event.target.closest('[data-action]'); if (!el || el.disabled) return;
   const action = el.dataset.action;
-  if (action.startsWith('read-') && speech && canSpeak) {
+  if (['read-passage', 'read-question'].includes(action) && speech && canSpeak) {
     if (action === 'read-passage') speak(set.sentences.join('。'));
     else { const q = set.questions[question]; speak(`${q.text}。${q.choices.map((c,i) => labels[i] + '。' + c).join('。')}`); }
     return;
   }
-  if (action === 'continue') return start((nextSet(data.sets, progress.completed) ?? data.sets[0]).id);
+  if (action === 'continue') { const plan = todayPlan(); if (plan.setId) return start(plan.setId); return; }
+  if (action === 'today-award') { const plan = todayPlan(); if (plan.state === 'done') { set = data.sets.find(s => s.id === plan.setId); screen = 'success'; saveMessage = ''; } else screen = 'home'; render(); return; }
   if (action === 'choose') return start(el.dataset.id);
   if (action === 'read-done' && screen === 'reading') { screen = 'question'; render(); return; }
   if (action === 'home') { if (['reading', 'question'].includes(screen) && !window.confirm('ホームに もどる？ この セットの とちゅうの こたえは きえます。')) return; screen = 'home'; speech = false; }
