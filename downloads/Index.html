@@ -113,6 +113,28 @@ body.in-result footer{display:none}
 const categories = { Who: 'だれ', When: 'いつ', Where: 'どこ', What: 'なに', Why: 'なぜ', How: 'どのように', WhatKind: 'どのような' };
 const STORAGE_KEY = '5w1h-reading:progress:v1';
 const DAILY_KEY = '5w1h-reading:daily:v1';
+const ORDER_KEY = '5w1h-reading:order:v1';
+function decodeOrder(raw) {
+  if (raw === null) return null;
+  const saved = JSON.parse(raw);
+  if (saved?.version !== 1 || !Array.isArray(saved.ids) || saved.ids.some(id => typeof id !== 'string') || new Set(saved.ids).size !== saved.ids.length) throw new Error('出題順が不正です');
+  return saved.ids;
+}
+function orderWithinLevels(sets, previous = [], random = Math.random) {
+  const byId = new Map(sets.map(set => [set.id, set]));
+  const result = [];
+  for (const level of [...new Set(sets.map(set => set.level))].sort((a, b) => a - b)) {
+    const retained = [...new Set(previous)].filter(id => byId.get(id)?.level === level);
+    const seen = new Set(retained);
+    const added = sets.filter(set => set.level === level && !seen.has(set.id)).map(set => set.id);
+    for (let i = added.length - 1; i > 0; i--) {
+      const j = Math.floor(random() * (i + 1));
+      [added[i], added[j]] = [added[j], added[i]];
+    }
+    result.push(...retained, ...added);
+  }
+  return result.map(id => byId.get(id));
+}
 function japanDay(date = new Date()) {
   return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
 }
@@ -173,6 +195,7 @@ const labels = ['あ', 'い', 'う'];
 const escape = value => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 let data, progress = { completed: [], last: null }, notice = '', saveMessage = '', daily = null;
 let screen = 'home', set, answers, question = 0, speech = false, previousAnswers = null, retryArrival = false;
+let studyOrder = [];
 const canSpeak = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
 function stopSpeech() { if (canSpeak) window.speechSynthesis.cancel(); }
 function speak(text) {
@@ -183,7 +206,17 @@ function speak(text) {
   window.speechSynthesis.speak(utterance);
 }
 function button(text, action, style = '', extra = '') { return `<button type="button" class="${style}" data-action="${action}" ${extra}>${text}</button>`; }
+function refreshOrder() {
+  let saved = null;
+  try { saved = decodeOrder(localStorage.getItem(ORDER_KEY)); } catch { /* 不正な順番だけを再作成し、進捗は保持する。 */ }
+  data.sets = orderWithinLevels(data.sets, saved ?? studyOrder);
+  studyOrder = data.sets.map(set => set.id);
+  if (JSON.stringify(saved) !== JSON.stringify(studyOrder)) {
+    try { localStorage.setItem(ORDER_KEY, JSON.stringify({ version: 1, ids: studyOrder })); } catch { /* この画面では同じ順番を保持する。 */ }
+  }
+}
 function todayPlan() {
+  refreshOrder();
   try {
     const savedProgress = localStorage.getItem(STORAGE_KEY);
     if (savedProgress !== null) progress = decodeProgress(savedProgress, data);
@@ -278,7 +311,7 @@ function fitLesson() {
 }
 window.addEventListener('resize', fitLesson);
 window.addEventListener('focus', () => { if (data && screen === 'home') render(); });
-window.addEventListener('storage', event => { if (data && [DAILY_KEY, STORAGE_KEY].includes(event.key) && screen === 'home') render(); });
+window.addEventListener('storage', event => { if (data && [DAILY_KEY, STORAGE_KEY, ORDER_KEY].includes(event.key) && screen === 'home') render(); });
 function render() {
   stopSpeech();
   app.dataset.screen = screen;
@@ -325,7 +358,7 @@ app.addEventListener('click', event => {
   if (action === 'back' && screen === 'question' && question > 0) question--;
   if (action === 'reset') {
     if (!window.confirm('ほぞんした けっかと すすみぐあいを けします。いいですか？')) return;
-    try { localStorage.removeItem(STORAGE_KEY); progress = { completed: [], last: null }; notice = 'ほぞんした けっかを けしたよ。'; }
+    try { localStorage.removeItem(STORAGE_KEY); localStorage.removeItem(ORDER_KEY); studyOrder = []; progress = { completed: [], last: null }; notice = 'ほぞんした けっかを けしたよ。'; }
     catch { notice = 'ほぞんした けっかを けせませんでした。ブラウザの せっていを たしかめてください。'; }
   }
   render();
